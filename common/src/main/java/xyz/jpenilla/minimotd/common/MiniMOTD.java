@@ -24,6 +24,9 @@
 package xyz.jpenilla.minimotd.common;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -35,6 +38,7 @@ import xyz.jpenilla.minimotd.common.config.ConfigManager;
 import xyz.jpenilla.minimotd.common.config.MOTDConfig;
 import xyz.jpenilla.minimotd.common.util.MiniPlaceholdersUtil;
 
+import static java.util.Objects.requireNonNull;
 import static net.kyori.adventure.text.Component.newline;
 
 @NullMarked
@@ -42,6 +46,8 @@ public final class MiniMOTD<I> {
   private final ConfigManager configManager;
   private final IconManager<I> iconManager;
   private final MiniMOTDPlatform<I> platform;
+  private final Object motdProviderLock = new Object();
+  private volatile List<RegisteredMOTDProvider> motdProviders = List.of();
 
   public MiniMOTD(final MiniMOTDPlatform<I> platform) {
     this.platform = platform;
@@ -82,6 +88,9 @@ public final class MiniMOTD<I> {
       .disablePlayerListHover(config.disablePlayerListHover())
       .hidePlayerCount(config.hidePlayerCount());
 
+    // MiniMOTD's configured MOTD is the base; external providers may override either line.
+    String baseLine1 = null;
+    String baseLine2 = null;
     String iconString = null;
     if (config.motdEnabled()) {
       if (config.motds().isEmpty()) {
@@ -89,13 +98,22 @@ public final class MiniMOTD<I> {
       }
       final int index = config.motds().size() == 1 ? 0 : ThreadLocalRandom.current().nextInt(config.motds().size());
       final MOTDConfig.MOTD motdConfig = config.motds().get(index);
+      baseLine1 = motdConfig.line1();
+      baseLine2 = motdConfig.line2();
+      iconString = motdConfig.icon();
+    }
+
+    final MOTDProvider.Result override = this.resolveProviderOverrides(count);
+    final String line1 = override.line1() != null ? override.line1() : baseLine1;
+    final String line2 = override.line2() != null ? override.line2() : baseLine2;
+
+    if (line1 != null || line2 != null) {
       final Component motd = Component.textOfChildren(
-        parse(motdConfig.line1(), count),
+        parse(line1 != null ? line1 : "", count),
         newline(),
-        parse(motdConfig.line2(), count)
+        parse(line2 != null ? line2 : "", count)
       );
       response.motd(motd);
-      iconString = motdConfig.icon();
     }
 
     if (config.iconEnabled()) {
@@ -103,6 +121,91 @@ public final class MiniMOTD<I> {
     }
 
     return response.build();
+  }
+
+  /**
+   * Consults the registered {@link MOTDProvider}s in descending priority order, resolving each
+   * line to the first provider that supplies a non-{@code null} value for it.
+   *
+   * @param count the player count for this ping
+   * @return the resolved overrides (either line may be {@code null} if no provider supplied it)
+   */
+  private MOTDProvider.Result resolveProviderOverrides(final PingResponse.PlayerCount count) {
+    final List<RegisteredMOTDProvider> providers = this.motdProviders;
+    if (providers.isEmpty()) {
+      return MOTDProvider.Result.empty();
+    }
+    final MOTDProvider.Context context = new MOTDProvider.Context(count);
+    String line1 = null;
+    String line2 = null;
+    for (final RegisteredMOTDProvider registered : providers) {
+      if (line1 != null && line2 != null) {
+        break;
+      }
+      final MOTDProvider.Result result;
+      try {
+        result = registered.provider().provide(context);
+      } catch (final Exception ex) {
+        this.logger().warn("MOTD provider {} threw an exception while providing a MOTD", registered.provider(), ex);
+        continue;
+      }
+      if (result == null) {
+        continue;
+      }
+      if (line1 == null && result.line1() != null) {
+        line1 = result.line1();
+      }
+      if (line2 == null && result.line2() != null) {
+        line2 = result.line2();
+      }
+    }
+    return MOTDProvider.Result.of(line1, line2);
+  }
+
+  /**
+   * Registers a {@link MOTDProvider} with the default priority of {@code 0}.
+   *
+   * @param provider the provider to register
+   */
+  public void registerMOTDProvider(final MOTDProvider provider) {
+    this.registerMOTDProvider(provider, 0);
+  }
+
+  /**
+   * Registers a {@link MOTDProvider}. Providers with a higher priority are consulted first.
+   * Providers registered with equal priority are consulted in registration order.
+   *
+   * @param provider the provider to register
+   * @param priority the priority (higher is consulted first)
+   */
+  public void registerMOTDProvider(final MOTDProvider provider, final int priority) {
+    requireNonNull(provider, "provider");
+    synchronized (this.motdProviderLock) {
+      final List<RegisteredMOTDProvider> updated = new ArrayList<>(this.motdProviders);
+      updated.add(new RegisteredMOTDProvider(provider, priority));
+      updated.sort(Comparator.comparingInt(RegisteredMOTDProvider::priority).reversed());
+      this.motdProviders = List.copyOf(updated);
+    }
+  }
+
+  /**
+   * Unregisters a previously registered {@link MOTDProvider}.
+   *
+   * @param provider the provider to unregister
+   * @return {@code true} if the provider was registered and has been removed
+   */
+  public boolean unregisterMOTDProvider(final MOTDProvider provider) {
+    synchronized (this.motdProviderLock) {
+      final List<RegisteredMOTDProvider> updated = new ArrayList<>(this.motdProviders);
+      final boolean removed = updated.removeIf(registered -> registered.provider() == provider);
+      if (removed) {
+        this.motdProviders = List.copyOf(updated);
+      }
+      return removed;
+    }
+  }
+
+  private record RegisteredMOTDProvider(MOTDProvider provider, int priority) {
   }
 
   private static Component parse(final String input, final PingResponse.PlayerCount count) {

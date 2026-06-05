@@ -113,6 +113,17 @@ public final class MiniMOTDVelocity implements MiniMOTDPlatform<Favicon> {
     );
   }
 
+  /**
+   * Gets the {@link MiniMOTD} instance. External plugins may use this to register a
+   * {@link xyz.jpenilla.minimotd.common.MOTDProvider} via
+   * {@link MiniMOTD#registerMOTDProvider(xyz.jpenilla.minimotd.common.MOTDProvider, int)}.
+   *
+   * @return the MiniMOTD instance
+   */
+  public @NonNull MiniMOTD<Favicon> miniMOTD() {
+    return this.miniMOTD;
+  }
+
   @Override
   public @NonNull Path dataDirectory() {
     return this.dataDirectory;
