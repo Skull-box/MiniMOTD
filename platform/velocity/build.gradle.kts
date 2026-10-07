@@ -41,3 +41,5 @@ publishMods.modrinth {
   minecraftVersions.addAll(minecraftVersion)
   optional("miniplaceholders")
 }
+
+apply(from = rootProject.file("gradle/skullbox-publish.gradle.kts")) // Skull-box : publication Maven (GitHub Packages)
